@@ -11,7 +11,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use alloc::vec::Vec;
 use cpu57_core::{CPU57, Instruction, Opcode, Word57};
-use framebuffer::{CPUUI, Framebuffer, VGA_HEIGHT, VGA_WIDTH};
+use framebuffer::{CPUUI, Framebuffer, VGA_HEIGHT, VGA_WIDTH, Color};
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -146,28 +146,25 @@ pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         ".code32",
         
-
         "cli",
         "cld",
         
         "mov esp, offset {stack}",
         "add esp, 65536",
         
-        "mov edi, eax",  // save magic
-        "mov esi, ebx",  // Save info pointer
+        "mov edi, eax",
+        "mov esi, ebx",
         
         "xor eax, eax",
         "mov edi, offset {pml4}",
         "mov ecx, 2048",
         "rep stosd",
         
-        // PML4[0] -> PDPT
         "mov edi, offset {pml4}",
         "lea eax, [{pdpt}]",
         "or eax, 3",
         "mov [edi], eax",
         
-        // PDPT[0] -> PD
         "mov edi, offset {pdpt}",
         "lea eax, [{pd}]",
         "or eax, 3",
@@ -182,16 +179,13 @@ pub unsafe extern "C" fn _start() -> ! {
         "add edi, 8",
         "loop 1b",
         
-        // load CR3
         "lea eax, [{pml4}]",
         "mov cr3, eax",
         
-        // enable PAE
         "mov eax, cr4",
         "or eax, 0x20",
         "mov cr4, eax",
         
-        // long mode in EFER MSR
         "mov ecx, 0xC0000080",
         "rdmsr",
         "or eax, 0x100",
@@ -201,7 +195,6 @@ pub unsafe extern "C" fn _start() -> ! {
         "or eax, 0x80000001",
         "mov cr0, eax",
         
-        // Setup GDT pointer
         "lea eax, [{gdt}]",
         "mov dword ptr [{gdt_ptr} + 2], eax",
         "xor eax, eax",
@@ -228,7 +221,6 @@ pub unsafe extern "C" fn _start() -> ! {
         "add rsp, 65536",
         "and rsp, -16",
         
-        // clear registers
         "xor rax, rax",
         "xor rbx, rbx",
         "xor rcx, rcx",
@@ -247,7 +239,6 @@ pub unsafe extern "C" fn _start() -> ! {
         
         "call {main}",
         
-        // Halt
         "3:",
         "hlt",
         "jmp 3b",
@@ -262,137 +253,370 @@ pub unsafe extern "C" fn _start() -> ! {
     )
 }
 
-#[no_mangle]
-extern "C" fn rust_main() -> ! {
-    // Simple test.
-    let _fb_ptr = 0xB8000 as *mut u32;
+// VGA text mode helper
+unsafe fn clear_vga_text() {
+    let vga_text = 0xB8000 as *mut u16;
+    for i in 0..(80 * 25) {
+        core::ptr::write_volatile(vga_text.add(i), 0x0000);
+    }
+}
+
+unsafe fn draw_text_ui(cpu: &CPU57) {
+    let vga_text = 0xB8000 as *mut u16;
     
-    unsafe {
-        let vga_text = 0xB8000 as *mut u16;
-        let msg = b"CPU-57 BOOT";
-        for (i, &byte) in msg.iter().enumerate() {
-            core::ptr::write_volatile(vga_text.add(i), 0x0F00 | byte as u16);
+    let title = b"CPU-57 MONITOR";
+    for i in 0..80 {
+        if i < title.len() {
+            core::ptr::write_volatile(vga_text.add(i), 0x1B00 | title[i] as u16);
+        } else {
+            core::ptr::write_volatile(vga_text.add(i), 0x1B00 | b' ' as u16);
         }
     }
     
-    // setup framebuffer properly, but framebuffer has been disabled for now during testing
-    // For QEMU framebuffer is typically at 0xE0000000 or 0xFD000000
+    let cycle_label = b"CYCLE:";
+    for (i, &byte) in cycle_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(50 + i), 0x1F00 | byte as u16);
+    }
+    draw_hex_at(vga_text, 57, 0, cpu.cycle_count, 12, 0x1E);
     
-    // Try to detect framebuffer
-    let _fb_addr = 0xFD000000usize;
+    let status = if cpu.halted { b"HALTED " } else { b"RUNNING" };
+    for (i, &byte) in status.iter().enumerate() {
+        let color = if cpu.halted { 0x1C } else { 0x1A };
+        core::ptr::write_volatile(vga_text.add(70 + i), (color << 8) | byte as u16);
+    }
     
-    // For safety, lets do a simple CPU test without graphics
+    let reg_label = b"REGISTERS:";
+    for (i, &byte) in reg_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(160 + i), 0x0E00 | byte as u16);
+    }
+    
+    for i in 0..16 {
+        let row = 3 + (i / 4);
+        let col = (i % 4) * 20;
+        let pos = row * 80 + col;
+        
+        let reg_name = format_register(i);
+        for (j, &byte) in reg_name.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(pos + j), 0x0A00 | byte as u16);
+        }
+        
+        draw_hex_at(vga_text, pos + 4, 0, cpu.registers[i].get(), 14, 0x0B);
+    }
+    
+    let pc_label = b"PC:";
+    for (i, &byte) in pc_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(560 + i), 0x0C00 | byte as u16);
+    }
+    draw_hex_at(vga_text, 564, 0, cpu.pc.get(), 14, 0x0B);
+    
+    let sp_label = b"SP:";
+    for (i, &byte) in sp_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(600 + i), 0x0C00 | byte as u16);
+    }
+    draw_hex_at(vga_text, 604, 0, cpu.sp.get(), 14, 0x0B);
+    
+    let inst_label = b"CURRENT INSTRUCTION:";
+    for (i, &byte) in inst_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(720 + i), 0x0E00 | byte as u16);
+    }
+    
+    if let Some(inst) = cpu.current_instruction {
+        let opcode_name = opcode_to_str(inst.opcode);
+        for (i, &byte) in opcode_name.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(800 + i), 0x0D00 | byte as u16);
+        }
+        
+        // RD, RS1, RS2
+        let rd_label = b"RD:";
+        for (i, &byte) in rd_label.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(810 + i), 0x0A00 | byte as u16);
+        }
+        draw_hex_at(vga_text, 814, 0, inst.rd as u64, 2, 0x0B);
+        
+        let rs1_label = b"RS1:";
+        for (i, &byte) in rs1_label.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(820 + i), 0x0A00 | byte as u16);
+        }
+        draw_hex_at(vga_text, 825, 0, inst.rs1 as u64, 2, 0x0B);
+        
+        let rs2_label = b"RS2:";
+        for (i, &byte) in rs2_label.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(830 + i), 0x0A00 | byte as u16);
+        }
+        draw_hex_at(vga_text, 835, 0, inst.rs2 as u64, 2, 0x0B);
+        
+        let imm_label = b"IMM:";
+        for (i, &byte) in imm_label.iter().enumerate() {
+            core::ptr::write_volatile(vga_text.add(880 + i), 0x0A00 | byte as u16);
+        }
+        draw_hex_at(vga_text, 885, 0, inst.immediate.get(), 14, 0x0B);
+    }
+    
+    let flag_label = b"FLAGS:";
+    for (i, &byte) in flag_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(960 + i), 0x0E00 | byte as u16);
+    }
+    
+    let z_color = if cpu.flags.zero { 0x0A } else { 0x08 };
+    let c_color = if cpu.flags.carry { 0x0A } else { 0x08 };
+    let o_color = if cpu.flags.overflow { 0x0A } else { 0x08 };
+    let n_color = if cpu.flags.negative { 0x0A } else { 0x08 };
+    
+    core::ptr::write_volatile(vga_text.add(970), (z_color << 8) | b'Z' as u16);
+    core::ptr::write_volatile(vga_text.add(972), (c_color << 8) | b'C' as u16);
+    core::ptr::write_volatile(vga_text.add(974), (o_color << 8) | b'O' as u16);
+    core::ptr::write_volatile(vga_text.add(976), (n_color << 8) | b'N' as u16);
+    
+    let bus_label = b"BUS ACTIVITY:";
+    for (i, &byte) in bus_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1120 + i), 0x0E00 | byte as u16);
+    }
+    
+    let active_color = if cpu.bus_active { 0x0A } else { 0x08 };
+    let active_text = if cpu.bus_active { b"ACTIVE  " } else { b"INACTIVE" };
+    for (i, &byte) in active_text.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1135 + i), (active_color << 8) | byte as u16);
+    }
+    
+    let addr_label = b"ADDR:";
+    for (i, &byte) in addr_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1200 + i), 0x0A00 | byte as u16);
+    }
+    draw_hex_at(vga_text, 1206, 0, cpu.address_bus.get(), 14, 0x0C);
+    
+    let data_label = b"DATA:";
+    for (i, &byte) in data_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1240 + i), 0x0A00 | byte as u16);
+    }
+    draw_hex_at(vga_text, 1246, 0, cpu.data_bus.get(), 14, 0x0C);
+    
+    let mem_label = b"MEMORY (at PC):";
+    for (i, &byte) in mem_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1360 + i), 0x0E00 | byte as u16);
+    }
+    
+    let addr = cpu.pc.get() as usize;
+    for i in 0..4 {
+        let row = 18 + i;
+        let mem_addr = (addr + i * 16).min(cpu.memory.len() - 1);
+        let pos = row * 80;
+        
+        draw_hex_at(vga_text, pos, 0, mem_addr as u64, 8, 0x0A);
+        
+        for j in 0..16 {
+            let byte_addr = mem_addr + j;
+            if byte_addr < cpu.memory.len() {
+                let byte = cpu.memory[byte_addr];
+                draw_hex_at(vga_text, pos + 10 + j * 3, 0, byte as u64, 2, 0x0B);
+            }
+        }
+    }
+    
+    let io_label = b"I/O PORTS (0-7):";
+    for (i, &byte) in io_label.iter().enumerate() {
+        core::ptr::write_volatile(vga_text.add(1760 + i), 0x0E00 | byte as u16);
+    }
+    
+    for i in 0..8 {
+        let pos = 1840 + i * 10;
+        draw_hex_at(vga_text, pos, 0, i as u64, 1, 0x0A);
+        core::ptr::write_volatile(vga_text.add(pos + 2), 0x0F00 | b':' as u16);
+        draw_hex_at(vga_text, pos + 3, 0, cpu.io_ports[i].get(), 4, 0x0B);
+    }
+}
+
+unsafe fn draw_hex_at(vga_text: *mut u16, pos: usize, _row: usize, value: u64, width: usize, color: u8) {
+    let hex_chars = b"0123456789ABCDEF";
+    for i in 0..width {
+        let nibble = ((value >> ((width - 1 - i) * 4)) & 0xF) as usize;
+        core::ptr::write_volatile(
+            vga_text.add(pos + i),
+            ((color as u16) << 8) | hex_chars[nibble] as u16
+        );
+    }
+}
+
+fn format_register(i: usize) -> [u8; 4] {
+    let mut result = [b' '; 4];
+    result[0] = b'R';
+    if i < 10 {
+        result[1] = b'0';
+        result[2] = b'0' + i as u8;
+    } else {
+        result[1] = b'0' + (i / 10) as u8;
+        result[2] = b'0' + (i % 10) as u8;
+    }
+    result[3] = b':';
+    result
+}
+
+fn opcode_to_str(opcode: Opcode) -> &'static [u8] {
+    match opcode {
+        Opcode::NOP => b"NOP   ",
+        Opcode::ADD => b"ADD   ",
+        Opcode::SUB => b"SUB   ",
+        Opcode::MUL => b"MUL   ",
+        Opcode::DIV => b"DIV   ",
+        Opcode::AND => b"AND   ",
+        Opcode::OR => b"OR    ",
+        Opcode::XOR => b"XOR   ",
+        Opcode::NOT => b"NOT   ",
+        Opcode::SHL => b"SHL   ",
+        Opcode::SHR => b"SHR   ",
+        Opcode::ROL => b"ROL   ",
+        Opcode::ROR => b"ROR   ",
+        Opcode::LOAD => b"LOAD  ",
+        Opcode::STORE => b"STORE ",
+        Opcode::LOADI => b"LOADI ",
+        Opcode::MOV => b"MOV   ",
+        Opcode::CMP => b"CMP   ",
+        Opcode::JMP => b"JMP   ",
+        Opcode::JZ => b"JZ    ",
+        Opcode::JNZ => b"JNZ   ",
+        Opcode::JC => b"JC    ",
+        Opcode::JNC => b"JNC   ",
+        Opcode::CALL => b"CALL  ",
+        Opcode::RET => b"RET   ",
+        Opcode::PUSH => b"PUSH  ",
+        Opcode::POP => b"POP   ",
+        Opcode::IN => b"IN    ",
+        Opcode::OUT => b"OUT   ",
+        Opcode::HLT => b"HLT   ",
+    }
+}
+
+#[no_mangle]
+extern "C" fn rust_main() -> ! {
+    unsafe {
+        clear_vga_text();
+    }
+    
     let mut cpu = CPU57::new();
     
     let program = create_test_program();
     cpu.load_program(&program, 0);
     
-    // Run CPU for a bit
-    cpu.run(100);
-    
-    // Display results
-    unsafe {
-        let vga_text = 0xB8000 as *mut u16;
-        let msg = b"R0:";
-        for (i, &byte) in msg.iter().enumerate() {
-            core::ptr::write_volatile(vga_text.add(80 + i), 0x0A00 | byte as u16);
-        }
-        
-        // R0 value
-        let r0_val = cpu.registers[0].get();
-        let hex_chars = b"0123456789ABCDEF";
-        for i in 0..16 {
-            let nibble = ((r0_val >> ((15 - i) * 4)) & 0xF) as usize;
-            core::ptr::write_volatile(
-                vga_text.add(80 + 4 + i), 
-                0x0E00 | hex_chars[nibble] as u16
-            );
-        }
-        
-        // display R2
-        let msg2 = b"R2:";
-        for (i, &byte) in msg2.iter().enumerate() {
-            core::ptr::write_volatile(vga_text.add(160 + i), 0x0A00 | byte as u16);
-        }
-        
-        let r2_val = cpu.registers[2].get();
-        for i in 0..16 {
-            let nibble = ((r2_val >> ((15 - i) * 4)) & 0xF) as usize;
-            core::ptr::write_volatile(
-                vga_text.add(160 + 4 + i), 
-                0x0E00 | hex_chars[nibble] as u16
-            );
-        }
-        
-        // Display cycle count
-        let msg3 = b"CYCLES:";
-        for (i, &byte) in msg3.iter().enumerate() {
-            core::ptr::write_volatile(vga_text.add(240 + i), 0x0A00 | byte as u16);
-        }
-        
-        let cycles = cpu.cycle_count;
-        for i in 0..16 {
-            let nibble = ((cycles >> ((15 - i) * 4)) & 0xF) as usize;
-            core::ptr::write_volatile(
-                vga_text.add(240 + 8 + i), 
-                0x0E00 | hex_chars[nibble] as u16
-            );
-        }
-        
-        let status_msg = if cpu.halted { b"HALTED  " } else { b"RUNNING " };
-        for (i, &byte) in status_msg.iter().enumerate() {
-            core::ptr::write_volatile(
-                vga_text.add(320 + i), 
-                0x0C00 | byte as u16
-            );
-        }
-    }
+    let mut instruction_counter = 0u64;
     
     loop {
-        unsafe { core::arch::asm!("hlt") };
+        if !cpu.halted {
+            cpu.step();
+            instruction_counter += 1;
+        }
+        
+        unsafe {
+            draw_text_ui(&cpu);
+        }
+        
+        delay(200000);
+        
+        if cpu.halted {
+            delay(2000000);
+        }
     }
 }
 
 fn create_test_program() -> Vec<u8> {
     let mut program = Vec::new();
     
-    // load 42 into R0
     let loadi_r0 = Instruction {
         opcode: Opcode::LOADI,
         rd: 0,
         rs1: 0,
         rs2: 0,
-        immediate: Word57::new(42),
+        immediate: Word57::new(100),
     };
     program.extend_from_slice(&loadi_r0.encode());
     
-    // load 58 into R1
     let loadi_r1 = Instruction {
         opcode: Opcode::LOADI,
         rd: 1,
         rs1: 0,
         rs2: 0,
-        immediate: Word57::new(58),
+        immediate: Word57::new(5),
     };
     program.extend_from_slice(&loadi_r1.encode());
     
-    let add_r2 = Instruction {
-        opcode: Opcode::ADD,
-        rd: 2,
+    let sub_r0 = Instruction {
+        opcode: Opcode::SUB,
+        rd: 0,
         rs1: 0,
         rs2: 1,
         immediate: Word57::new(0),
     };
-    program.extend_from_slice(&add_r2.encode());
+    program.extend_from_slice(&sub_r0.encode());
     
-    let mul_r3 = Instruction {
-        opcode: Opcode::MUL,
+    let loadi_r3 = Instruction {
+        opcode: Opcode::LOADI,
         rd: 3,
         rs1: 0,
-        rs2: 1,
+        rs2: 0,
+        immediate: Word57::new(2),
+    };
+    program.extend_from_slice(&loadi_r3.encode());
+    
+    let mul_r2 = Instruction {
+        opcode: Opcode::MUL,
+        rd: 2,
+        rs1: 0,
+        rs2: 3,
         immediate: Word57::new(0),
     };
-    program.extend_from_slice(&mul_r3.encode());
+    program.extend_from_slice(&mul_r2.encode());
+    
+    let loadi_r4 = Instruction {
+        opcode: Opcode::LOADI,
+        rd: 4,
+        rs1: 0,
+        rs2: 0,
+        immediate: Word57::new(1000),
+    };
+    program.extend_from_slice(&loadi_r4.encode());
+    
+    let store = Instruction {
+        opcode: Opcode::STORE,
+        rd: 2,
+        rs1: 4,
+        rs2: 0,
+        immediate: Word57::new(0),
+    };
+    program.extend_from_slice(&store.encode());
+    
+    let out_inst = Instruction {
+        opcode: Opcode::OUT,
+        rd: 2,
+        rs1: 0,
+        rs2: 0,
+        immediate: Word57::new(5),
+    };
+    program.extend_from_slice(&out_inst.encode());
+    
+    let cmp = Instruction {
+        opcode: Opcode::CMP,
+        rd: 0,
+        rs1: 0,
+        rs2: 0,
+        immediate: Word57::new(0),
+    };
+    program.extend_from_slice(&cmp.encode());
+    
+    let jz = Instruction {
+        opcode: Opcode::JZ,
+        rd: 0,
+        rs1: 0,
+        rs2: 0,
+        immediate: Word57::new(100),
+    };
+    program.extend_from_slice(&jz.encode());
+    
+    let jmp = Instruction {
+        opcode: Opcode::JMP,
+        rd: 0,
+        rs1: 0,
+        rs2: 0,
+        immediate: Word57::new(20),
+    };
+    program.extend_from_slice(&jmp.encode());
     
     let hlt = Instruction {
         opcode: Opcode::HLT,
@@ -406,10 +630,10 @@ fn create_test_program() -> Vec<u8> {
     program
 }
 
-fn delay(_count: u32) {
-    for _ in 0.._count {
+fn delay(count: u32) {
+    for _ in 0..count {
         unsafe {
-            core::arch::asm!("nop");
+            core::arch::asm!("nop", options(nomem, nostack));
         }
     }
 }
