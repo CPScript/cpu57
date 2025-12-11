@@ -28,15 +28,15 @@ run: iso
 	qemu-system-x86_64 -cdrom $(ISO_FILE) \
 		-serial stdio \
 		-m 512M \
-		-device VGA,vgamem_mb=32 \
-		-d int,cpu_reset
-
+		-display gtk \
+		-vga std
 
 debug: iso
 	qemu-system-x86_64 -cdrom $(ISO_FILE) \
 		-serial stdio \
 		-m 512M \
-		-device VGA,vgamem_mb=32 \
+		-display gtk \
+		-vga std \
 		-s -S
 
 clean:
