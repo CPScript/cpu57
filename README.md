@@ -101,7 +101,7 @@ end:
 
 ## Images
 
-* Gif of the current HDL's graphical output
+* Gif of the current output
 ![output](https://github.com/user-attachments/assets/da348ebe-007d-4f4f-92ff-c1762d3c5b3a)
 
 
