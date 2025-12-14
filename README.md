@@ -55,12 +55,10 @@ make run
 ```
 Requires: Rust nightly, QEMU, grub-mkrescue
 
-## Implementation
+## Images
 
-- **hdl/cpu57.v**: Verilog implementation with CPU, ALU, memory, and I/O controller
-- **src/cpu57_core.rs**: Pure Rust CPU emulator
-- **src/hdl_bridge.rs**: Bridge to Verilator-compiled HDL (for hosted environments)
-- **src/main.rs**: Bare metal kernel with VGA text mode monitor
+![525211649-da348ebe-007d-4f4f-92ff-c1762d3c5b3a](https://github.com/user-attachments/assets/03b61596-89fb-4dc8-b613-522edc1f64de)
+
 
 The kernel displays CPU state in real-time: registers, PC, SP, flags, current instruction, bus activity, memory, and I/O ports.
 
