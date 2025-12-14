@@ -11,7 +11,7 @@ You might wonder when you'd need this, and i'll tell you why.
 3; Physical hardware synthesis
 
 Currently we're using Verilator, which compiles Verilog to C++ for software simulation. No physical pins needed.
-So currently this script isn't needed currently but is added here for you to mess around with.
+So for now this script isn't needed currently but is added here for you to mess around with.
 
 --- Delete all text above to implement this script if needed ---
 
@@ -25,5 +25,6 @@ set_max_delay 8.000 -from [get_pins cpu/dp/registers_reg*/C] -to [get_pins cpu/d
 set_max_delay 8.000 -from [get_pins cpu/cu/state_reg*/C] -to [get_pins cpu/dp/*]
 
 set_false_path -from [get_ports rst_n]
+
 
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets clk_IBUF]
