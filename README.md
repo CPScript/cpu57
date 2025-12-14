@@ -1,6 +1,7 @@
-# CPU-57
+# CPU-57 | A emulator and HDL
 
-A 57-bit CPU architecture with hardware implementation in Verilog and software emulation in Rust, running as a bare-metal x86-64 kernel.
+> [!WARNING]
+> This is still in testing and some things that are expected might not be fully implemented, or disabled by default. Contributers are welcome!
 
 ## Architecture
 
